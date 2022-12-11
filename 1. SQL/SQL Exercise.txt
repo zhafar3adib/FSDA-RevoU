@@ -1,0 +1,217 @@
+-- 
+-- 1. Create a query to get the number of unique users, number of orders, and total sale price
+-- per status and month. Note: Please use time frame from Jan 2019 until Aug 2022
+--
+SELECT
+ CAST(DATE_TRUNC(created_at, MONTH) as DATE) MonthYear,
+ status,
+ COUNT(DISTINCT user_id) total_unique_user,
+ COUNT(DISTINCT order_id) total_order,
+ ROUND(SUM(sale_price),2) total_sale_price
+FROM `bigquery-public-data.thelook_ecommerce.order_items`
+WHERE DATE(created_at) BETWEEN '2019-01-01' AND '2022-08-31'
+GROUP BY 1,2
+ORDER BY 1 ASC;
+
+-- 
+-- 2. Create a query to get frequencies, average order value and total number of unique users where
+-- status is complete grouped by month. Note: Please use time frame from Jan 2019 until Aug 2022
+--
+SELECT
+ CAST(DATE_TRUNC(created_at, MONTH) as DATE) MonthYear,
+ COUNT(DISTINCT order_id) frequencies,
+ ROUND((SUM(sale_price)/COUNT(DISTINCT order_id)),2) aov,
+ COUNT (DISTINCT user_id) count_unique_user
+FROM `bigquery-public-data.thelook_ecommerce.order_items`
+WHERE status = 'Complete' AND (DATE(created_at) BETWEEN '2019-01-01' AND '2022-08-31')
+GROUP BY 1
+ORDER BY 1 ASC;
+
+-- 
+-- 3. Find the user id, email, first and last name of users whose status is refunded on Aug 2022
+--
+SELECT 
+  DISTINCT u.id,
+  u.email,
+  u.first_name,
+  u.last_name,
+  oi.order_id,
+  u.country,
+  COUNT(oi.order_id) product_returned
+FROM `bigquery-public-data.thelook_ecommerce.users` u
+LEFT JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON u.id = oi.user_id 
+WHERE oi.status = 'Returned' AND (DATE(oi.created_at) BETWEEN '2022-08-01' AND '2022-08-31')
+GROUP BY 1,2,3,4,5,6;
+
+-- 
+-- 4. Get the top 5 least and most profitable product over all time
+--
+WITH top5_most_profit AS
+  (
+  SELECT
+    oi.product_id,
+    p.name,
+    p.category,
+    p.cost,
+    p.retail_price,
+    COUNT(oi.product_id) product_sold,
+    ROUND(100*((p.retail_price - p.cost)/p.cost),2) profit_percentage,
+    ROUND((COUNT(oi.product_id)*(p.retail_price-p.cost)),2) profit
+  FROM `bigquery-public-data.thelook_ecommerce.order_items` oi
+  LEFT JOIN `bigquery-public-data.thelook_ecommerce.products` p ON oi.product_id = p.id
+  WHERE oi.status = 'Complete'
+  GROUP BY 1,2,3,4,5
+  ORDER BY profit DESC
+  LIMIT 5
+  ),
+top5_least_profit AS
+  (
+  SELECT
+    oi.product_id,
+    p.name,
+    p.category,
+    p.cost,
+    p.retail_price,
+    COUNT(oi.product_id) product_sold,
+    ROUND(100*((p.retail_price - p.cost)/p.cost),2) profit_percentage,
+    ROUND((COUNT(oi.product_id)*(p.retail_price-p.cost)),2) profit
+  FROM `bigquery-public-data.thelook_ecommerce.order_items` oi
+  LEFT JOIN `bigquery-public-data.thelook_ecommerce.products` p ON oi.product_id = p.id
+  WHERE oi.status = 'Complete'
+  GROUP BY 1,2,3,4,5
+  ORDER BY profit ASC
+  LIMIT 5
+  )
+SELECT * FROM top5_least_profit
+UNION ALL
+SELECT * FROM top5_most_profit;
+
+-- 
+-- 5. Create a query to get Month to Date of total profit in each product categories of past 3 months,
+-- breakdown by month and categories. Note: current date 15 Aug 2022
+--
+WITH p AS
+  ( 
+    SELECT
+      p.date,
+      p.category,
+      SUM(p.product_sold) product_sold,
+      SUM(p.profit) profit
+    FROM
+      ( 
+        SELECT
+          CAST(DATE_TRUNC(oi.created_at, day) AS DATE) AS date,
+          p.category,
+          COUNT(oi.product_id) product_sold,
+          ROUND((COUNT(oi.product_id)*(p.retail_price-p.cost)),2) profit
+        FROM `bigquery-public-data.thelook_ecommerce.products` p
+        LEFT JOIN `bigquery-public-data.thelook_ecommerce.order_items` oi ON p.id = oi.product_id
+        WHERE DATE(oi.created_at) BETWEEN DATE_SUB('2022-08-01', INTERVAL 3 MONTH) AND '2022-08-15'
+          AND oi.status = 'Complete'
+        GROUP BY 1,2, p.retail_price, p.cost
+        ORDER BY 1,2 ASC
+      ) p
+    GROUP BY 1,2
+    ORDER BY 1,2 ASC
+  ),
+mtd AS
+  (
+    SELECT
+      p.date, p.category, p.product_sold, p.profit,
+      SUM(p.product_sold) OVER (PARTITION BY p.category ORDER BY p.date) acc_product_sold_3_mtd,
+      ROUND((SUM(p.profit) OVER (PARTITION BY p.category ORDER BY p.date)),2) acc_profit_3_mtd
+    FROM p
+  )
+SELECT *
+FROM mtd
+WHERE mtd.date BETWEEN '2022-08-01' AND '2022-08-15';
+
+-- 
+-- 6. Find monthly growth of inventory in percentage breakdown by product categories, ordered by time
+-- descendingly. Note: Please use time frame from Jan 2019 until Apr 2022
+--
+WITH amt AS
+  (
+  SELECT
+    CAST(DATE_TRUNC(created_at, MONTH) AS DATE) date,
+    product_category,
+    COUNT(product_category) amount,
+  FROM `bigquery-public-data.thelook_ecommerce.inventory_items` 
+  WHERE DATE(created_at) BETWEEN '2019-01-01' AND '2022-04-30'
+  GROUP BY 1,2
+  ORDER BY 1,2 ASC
+  )
+SELECT
+  amt.date,
+  amt.product_category,
+  amt.amount,
+  LEAD(amt.amount,1,0) OVER (PARTITION BY amt.product_category ORDER BY amt.date DESC) amount_last_month,
+  ROUND(
+    100*(
+      CASE WHEN
+        LEAD(amt.amount,1,0) OVER (PARTITION BY amt.product_category ORDER BY amt.date DESC) >0
+      THEN
+        (amt.amount - LEAD(amt.amount,1,0) OVER (PARTITION BY amt.product_category ORDER BY amt.date DESC))
+        /LEAD(amt.amount,1,0) OVER (PARTITION BY amt.product_category ORDER BY amt.date DESC)
+      ELSE
+        0
+      END
+      ),
+      2) growth_percentage
+FROM amt
+ORDER BY 2 ASC;
+
+-- 
+-- 7. Create monthly retention cohorts (the groups, or cohorts, can be defined based upon the date
+-- that a user completely purchased a product) and then how many of them (%) coming back for the
+-- following months in date 2022.
+--
+WITH cohort_items AS
+ (
+  SELECT
+    user_id,
+    MIN(CAST(DATE_TRUNC(created_at,MONTH) AS DATE)) cohort_month,
+  FROM `bigquery-public-data.thelook_ecommerce.order_items`
+  WHERE status = 'Complete'
+  GROUP BY 1
+  ),
+user_activities AS
+  (
+  SELECT
+    act.user_id user_id,
+    DATE_DIFF(
+      CAST(DATE_TRUNC(created_at,MONTH) AS DATE),
+      cohort.cohort_month,
+      MONTH
+      ) month_number,
+  FROM `bigquery-public-data.thelook_ecommerce.order_items` act
+  LEFT JOIN cohort_items cohort ON act.user_id = cohort.user_id
+  WHERE status = 'Complete'  AND DATE(cohort.cohort_month) >= '2022-01-01'
+  GROUP BY 1, 2
+  ),
+cohort_size AS (
+    SELECT  cohort_month,
+    COUNT(DISTINCT user_id) num_users
+    FROM cohort_items
+    GROUP BY 1
+    ORDER BY 1
+),
+retention_table AS (
+  SELECT
+    ci.cohort_month,
+    ua.month_number,
+    COUNT(DISTINCT ua.user_id) num_users
+  FROM user_activities ua
+  LEFT JOIN cohort_items ci ON ua.user_id = ci.user_id
+  GROUP BY 1,2
+)
+SELECT
+  rt.cohort_month,
+  cs.num_users cohort_size,
+  rt.month_number,
+  rt.num_users total_users,
+  ROUND((rt.num_users / cs.num_users),3) percentage,
+FROM retention_table rt
+LEFT JOIN cohort_size cs ON rt.cohort_month = cs.cohort_month
+ORDER BY 1,3; 
+
